@@ -375,7 +375,6 @@ html, body { margin:0; height:100%; background: var(--bg); color: var(--text); f
   </div>
 </div>
 <input type="file" id="fileInput" class="hidden">
-<input type="file" id="videoNoteInput" accept="video/*" class="hidden">
 <div id="profileModal" class="modal hidden">
   <div class="modal-content">
     <div class="modal-header"><span>Edit Profile</span><button class="modal-close" data-modal="profileModal">×</button></div>
@@ -542,8 +541,7 @@ function bindChatEvents() {
   q('clearHistoryBtn').addEventListener('click', () => { if (confirm('Clear global history?')) socket.emit('clear_history'); });
   q('attachBtn').addEventListener('click', () => q('fileInput').click());
   q('fileInput').addEventListener('change', () => handleFileUpload(q('fileInput').files[0]));
-  q('videoNoteBtn').addEventListener('click', () => q('videoNoteInput').click());
-  q('videoNoteInput').addEventListener('change', () => handleVideoNoteUpload(q('videoNoteInput').files[0]));
+  q('videoNoteBtn').addEventListener('click', toggleVideoRecording);
   q('recordBtn').addEventListener('click', toggleRecording);
 }
 
@@ -672,21 +670,82 @@ function handleFileUpload(file) {
   reader.readAsDataURL(file);
 }
 
-function handleVideoNoteUpload(file) {
-  if (!file) return;
-  if (file.size > 290 * 1024) { showToast('Video max 300KB'); return; }
-  showToast('Processing video circle...');
-  const url = URL.createObjectURL(file);
-  const video = document.createElement('video'); video.src = url; video.muted = true; video.playsInline = true;
+async function toggleVideoRecording() {
+  const btn = q('videoNoteBtn');
+  if (App.videoRecorder && App.videoRecorder.state === 'recording') { stopVideoRecording(); return; }
+  if (App.mediaRecorder && App.mediaRecorder.state === 'recording') { showToast('Audio recording in progress'); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({video: {width: 480, height: 480}, audio: true});
+    App.videoStream = stream;
+    App.videoRecorder = new MediaRecorder(stream, {mimeType: 'video/webm;codecs=vp8,opus'});
+    App.videoChunks = [];
+    App.recordingStart = Date.now();
+    App.videoRecorder.ondataavailable = (e) => { if (e.data.size > 0) App.videoChunks.push(e.data); };
+    App.videoRecorder.onstop = () => { processVideoRecording(); stream.getTracks().forEach((t) => t.stop()); };
+    App.videoRecorder.start(100);
+    btn.classList.add('recording');
+    showVideoRecordingPanel(true, stream);
+  } catch (e) { showToast('Camera access denied or unsupported'); console.error(e); }
+}
+function stopVideoRecording() { if (App.videoRecorder && App.videoRecorder.state === 'recording') App.videoRecorder.stop(); }
+async function processVideoRecording() {
+  showToast('Processing video...');
+  const blob = new Blob(App.videoChunks, {type: 'video/webm'});
+  if (blob.size > 300 * 1024) { showToast('Video too large (max 300KB)'); q('videoNoteBtn').classList.remove('recording'); showVideoRecordingPanel(false); return; }
+  
+  // Create video element to draw to canvas for cropping to circle/square
+  const url = URL.createObjectURL(blob);
+  const video = document.createElement('video');
+  video.src = url; video.muted = true; video.playsInline = true;
   video.onloadedmetadata = () => {
-    const size = Math.min(video.videoWidth, video.videoHeight);
     const canvas = document.createElement('canvas');
     canvas.width = 320; canvas.height = 320;
     const ctx = canvas.getContext('2d');
+    const size = Math.min(video.videoWidth, video.videoHeight);
     const sx = (video.videoWidth - size) / 2, sy = (video.videoHeight - size) / 2;
-    function draw() { if (video.currentTime < video.duration && video.currentTime < 60) { ctx.drawImage(video, sx, sy, size, size, 0, 0, 320, 320); requestAnimationFrame(draw); } else { const dataUrl = canvas.toDataURL('image/webm', 0.9); sendMediaMessage({text: 'Video circle', mediaType: 'video_note', fileUrl: dataUrl, fileName: 'circle.webm', fileSize: 0, mime: 'video/webm', duration: Math.floor(video.duration)}); URL.revokeObjectURL(url); } }
-    video.play(); draw();
+    
+    // We'll extract a single square frame as poster, and send the original webm blob
+    // (Live re-encoding on canvas is too heavy/complex without MediaRecorder on canvas)
+    video.currentTime = 0;
+    video.onseeked = () => {
+      ctx.drawImage(video, sx, sy, size, size, 0, 0, 320, 320);
+      const posterUrl = canvas.toDataURL('image/jpeg', 0.8);
+      
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        sendMediaMessage({
+          text: 'Video circle',
+          mediaType: 'video_note',
+          fileUrl: e.target.result, // Send full webm blob (cropped visually by CSS)
+          fileName: 'circle.webm',
+          fileSize: blob.size,
+          mime: 'video/webm',
+          duration: Math.floor(video.duration || (Date.now() - App.recordingStart)/1000)
+        });
+        URL.revokeObjectURL(url);
+        q('videoNoteBtn').classList.remove('recording');
+        showVideoRecordingPanel(false);
+      };
+      reader.readAsDataURL(blob);
+    };
   };
+}
+function showVideoRecordingPanel(show, stream) {
+  const input = q('messageInput'), attach = q('attachBtn'), vnBtn = q('videoNoteBtn'), micBtn = q('recordBtn');
+  if (show) {
+    input.style.display = 'none'; attach.style.display = 'none'; micBtn.style.display = 'none';
+    const panel = document.createElement('div'); panel.id = 'videoRecordPanel'; panel.className = 'record-panel';
+    panel.style.justifyContent = 'space-between';
+    panel.innerHTML = '<div style="display:flex;align-items:center;gap:10px"><video id="liveVideo" autoplay muted playsinline style="width:36px;height:36px;border-radius:50%;object-fit:cover;background:#000;border:2px solid var(--accent);"></video><span class="record-timer" id="vRecordTimer" style="color:red">0:00</span></div><span class="cancel-record" id="cancelVRecord">Cancel</span>';
+    q('inputArea').insertBefore(panel, q('sendBtn'));
+    q('liveVideo').srcObject = stream;
+    q('cancelVRecord').addEventListener('click', () => { if (App.videoRecorder) { App.videoChunks = []; App.videoRecorder.stop(); } q('videoNoteBtn').classList.remove('recording'); showVideoRecordingPanel(false); });
+    App.vRecordInterval = setInterval(() => { const s = Math.floor((Date.now() - App.recordingStart) / 1000); q('vRecordTimer').textContent = Math.floor(s / 60) + ':' + (s % 60).toString().padStart(2, '0'); }, 1000);
+  } else {
+    input.style.display = ''; attach.style.display = ''; micBtn.style.display = '';
+    const panel = q('videoRecordPanel'); if (panel) panel.remove();
+    clearInterval(App.vRecordInterval);
+  }
 }
 
 function sendMediaMessage(payload) {
