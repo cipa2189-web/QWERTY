@@ -197,15 +197,15 @@ function getChatListForUser(userId) {
   const list = [];
   for (const chat of chats.values()) {
     if (chat.type === 'global') {
-      list.push({ id: chat.id, type: 'global', name: 'Global Chat', avatar: null, lastMessage: chat.messages[chat.messages.length - 1] || null, unread: 0 });
+      list.push({ id: chat.id, type: 'global', name: 'Global Chat', avatar: null, lastMessage: chat.messages[chat.messages.length - 1] || null, unread: getUnreadCount(userId, chat.id) });
     } else if (chat.type === 'private') {
       if (!chat.members.has(userId)) continue;
       const other = Array.from(chat.members).find((id) => id !== userId);
       const u = users.get(other);
-      list.push({ id: chat.id, type: 'private', userId: other, name: u ? u.username : 'Unknown', avatar: u ? u.avatarBase64 : null, lastMessage: chat.messages[chat.messages.length - 1] || null, unread: 0 });
+      list.push({ id: chat.id, type: 'private', userId: other, name: u ? u.username : 'Unknown', avatar: u ? u.avatarBase64 : null, lastMessage: chat.messages[chat.messages.length - 1] || null, unread: getUnreadCount(userId, chat.id) });
     } else if (chat.type === 'group') {
       if (!chat.members.has(userId)) continue;
-      list.push({ id: chat.id, type: 'group', name: chat.name, avatar: null, lastMessage: chat.messages[chat.messages.length - 1] || null, unread: 0, membersCount: chat.members.size });
+      list.push({ id: chat.id, type: 'group', name: chat.name, avatar: null, lastMessage: chat.messages[chat.messages.length - 1] || null, unread: getUnreadCount(userId, chat.id), membersCount: chat.members.size });
     }
   }
   return list;
@@ -213,11 +213,6 @@ function getChatListForUser(userId) {
 
 function markMessagesRead(chatId, userId) {
   clearUnread(userId, chatId);
-}
-
-function getUnreadCountsForUser(userId) {
-  const m = unreadCounts.get(userId);
-  return m ? Object.fromEntries(m) : {};
 }
 
 // ---------- Multer uploads ----------
@@ -259,9 +254,6 @@ html, body { margin:0; height:100%; background: var(--bg); color: var(--text); f
 .auth-tabs { display:flex; margin-bottom:18px; border-bottom:1px solid var(--border); }
 .auth-tabs button { flex:1; background:none; border:none; color: var(--muted); padding:12px; cursor:pointer; font-size:15px; transition:.2s; }
 .auth-tabs button.active { color: var(--text); border-bottom:2px solid var(--accent); }
-.tabs-bar { display:flex; border-bottom:1px solid var(--border); }
-.tab-btn { flex:1; background:none; border:none; color:var(--muted); padding:12px; cursor:pointer; font-size:14px; font-weight:600; transition:.2s; border-bottom:2px solid transparent; }
-.tab-btn.active { color:var(--text); border-bottom:2px solid var(--accent); }
 .auth-form input { width:100%; margin-bottom:14px; padding:12px; background: var(--bg); border:1px solid var(--border); border-radius:10px; color: var(--text); outline:none; }
 .auth-form input:focus { border-color: var(--accent); }
 .btn-primary { width:100%; padding:12px; background: var(--accent); border:none; border-radius:10px; color:#fff; cursor:pointer; font-weight:700; transition:.2s; }
@@ -430,7 +422,7 @@ html, body { margin:0; height:100%; background: var(--bg); color: var(--text); f
     <div id="chatContainer" class="chat-container">
       <aside class="sidebar">
         <div class="sidebar-header">
-          <div class="header-title">Telegram</div>
+          <div class="header-title">Chats</div>
           <div style="display:flex;gap:6px">
             <button id="newGroupBtn" class="icon-btn" title="New group">👥</button>
             <button id="themeBtn" class="icon-btn" title="Theme">🎨</button>
@@ -438,14 +430,9 @@ html, body { margin:0; height:100%; background: var(--bg); color: var(--text); f
           </div>
         </div>
         <div class="search-box">
-          <input id="searchUsers" placeholder="Search..." autocomplete="off">
+          <input id="searchUsers" placeholder="Search users..." autocomplete="off">
         </div>
-        <div class="tabs-bar">
-          <button id="tabChats" class="tab-btn active">Chats</button>
-          <button id="tabUsers" class="tab-btn">Users</button>
-        </div>
-        <div id="chatsList" class="user-list"></div>
-        <div id="usersList" class="user-list hidden"></div>
+        <div id="userList" class="user-list"></div>
       </aside>
       <main class="chat-main">
         <div class="chat-header">
@@ -533,7 +520,6 @@ function init() {
   socket.on('error_message', (m) => showToast(m));
   socket.on('users_list', (list) => { App.users = list; renderChatList(); updateChatSubtitle(); });
   socket.on('chats_list', (list) => { App.chats = list; renderChatList(); });
-  socket.on('unread_counts', (counts) => { App.chats.forEach((c) => { c.unread = counts[c.id] || 0; }); renderChatList(); });
   socket.on('message', (data) => handleIncoming(data.chatId, data.message));
   socket.on('system_message', (data) => handleIncoming(data.chatId, data));
   socket.on('history', (data) => { if (data.chatId === App.currentChatId) renderHistory(data.messages, data.pinnedId); });
@@ -583,20 +569,40 @@ function showChat() { q('authScreen').classList.add('hidden'); q('chatScreen').c
 function showAuth() { q('authScreen').classList.remove('hidden'); q('chatScreen').classList.add('hidden'); }
 
 function renderHeader() {
-  const chat = App.chats.find((c) => c.id === App.currentChatId);
-  q('chatTitle').textContent = chat ? chat.name : 'Global Chat';
+  const chat = findChatById(App.currentChatId);
+  q('chatTitle').textContent = chat ? (chat.name || getUserDisplayName(chat.userId)) : 'Global Chat';
   updateChatSubtitle();
   const canClear = App.currentChatId === 'global' && App.user && App.user.isAdmin;
   q('clearHistoryBtn').classList.toggle('hidden', !canClear);
 }
 function updateChatSubtitle() {
   if (App.currentChatId === 'global') { q('chatSubtitle').textContent = App.users.length + ' users'; return; }
-  const chat = App.chats.find((c) => c.id === App.currentChatId);
-  if (!chat) return;
+  const chat = findChatById(App.currentChatId);
+  if (!chat) {
+    // Private chat not yet in list
+    if (App.currentChatId.startsWith('private:')) {
+      const userId = App.currentChatId.replace('private:', '');
+      const u = App.users.find((x) => x.id === userId);
+      q('chatSubtitle').textContent = u && u.online ? 'online' : (u ? formatLastSeen(u.lastSeen) : 'last seen recently');
+    }
+    return;
+  }
   if (chat.type === 'private') {
     const u = App.users.find((x) => x.id === chat.userId);
     q('chatSubtitle').textContent = u && u.online ? 'online' : (u ? formatLastSeen(u.lastSeen) : 'last seen recently');
   } else if (chat.type === 'group') { q('chatSubtitle').textContent = chat.membersCount + ' members'; }
+}
+function findChatById(chatId) {
+  if (chatId === 'global') return App.chats.find((c) => c.id === 'global');
+  if (chatId.startsWith('private:')) {
+    const userId = chatId.replace('private:', '');
+    return App.chats.find((c) => c.type === 'private' && c.userId === userId);
+  }
+  return App.chats.find((c) => c.id === chatId);
+}
+function getUserDisplayName(userId) {
+  const u = App.users.find((x) => x.id === userId);
+  return u ? u.username : 'Unknown';
 }
 function formatLastSeen(ts) {
   const diff = Math.floor((Date.now() - ts) / 1000);
@@ -623,6 +629,11 @@ function bindChatEvents() {
 }
 
 function openChat(chatId) {
+  // If it's a new private chat, create it first
+  if (chatId.startsWith('private:')) {
+    const userId = chatId.replace('private:', '');
+    socket.emit('create_private_chat', {userId});
+  }
   App.currentChatId = chatId; App.replyTo = null; App.editId = null; q('replyBar').classList.add('hidden');
   q('messagesArea').innerHTML = ''; App.typing = {}; q('typingIndicator').textContent = '';
   renderHeader(); renderChatList();
@@ -632,93 +643,52 @@ function openChat(chatId) {
 
 function renderChatList() {
   const term = q('searchUsers').value.trim().toLowerCase();
-  const list = q('chatsList'); list.innerHTML = '';
-  const showChats = !q('chatsList').classList.contains('hidden');
-  if (showChats) {
-    // Render chats tab
-    App.chats.forEach((chat) => {
-      if (term) { const s = (chat.name + ' ' + (chat.lastMessage && chat.lastMessage.text || '')).toLowerCase(); if (s.indexOf(term) === -1) return; }
-      const item = document.createElement('div');
-      item.className = 'user-item' + (chat.id === App.currentChatId ? ' active' : '');
-      item.appendChild(getChatAvatarHTML(chat));
-      const info = document.createElement('div'); info.className = 'user-info';
-      const top = document.createElement('div'); top.style.display = 'flex'; top.style.justifyContent = 'space-between';
-      const name = document.createElement('div'); name.className = 'user-name'; name.textContent = chat.name;
-      const time = document.createElement('div'); time.style.fontSize = '11px'; time.style.color = 'var(--muted)'; time.textContent = chat.lastMessage ? formatTime(chat.lastMessage.timestamp) : '';
-      top.appendChild(name); top.appendChild(time);
-      const last = document.createElement('div'); last.className = 'last-msg';
-      last.textContent = chat.lastMessage ? (chat.lastMessage.type === 'system' ? chat.lastMessage.text : (chat.lastMessage.sender && chat.lastMessage.sender.username ? chat.lastMessage.sender.username + ': ' : '') + previewText(chat.lastMessage)) : 'No messages';
-      info.appendChild(top); info.appendChild(last);
-      item.appendChild(info);
-      // unread badge
-      if (chat.unread > 0) {
-        const badge = document.createElement('div');
-        badge.style.cssText = 'background:var(--accent);color:#fff;border-radius:50%;font-size:11px;min-width:18px;height:18px;padding:2px 6px;margin-left:8px;display:flex;align-items:center;justify-content:center;';
-        badge.textContent = chat.unread > 99 ? '99+' : chat.unread;
-        item.appendChild(badge);
-      }
-      item.addEventListener('click', () => openChat(chat.id));
-      list.appendChild(item);
-    });
-  } else {
-    // Render users tab
-    App.users.forEach((u) => {
-      if (u.id === App.user.id) return;
-      if (term && u.username.toLowerCase().indexOf(term) === -1 && (!u.about || u.about.toLowerCase().indexOf(term) === -1)) return;
-      const item = document.createElement('div');
-      item.className = 'user-item';
-      item.appendChild(getUserAvatarHTML(u));
-      const info = document.createElement('div'); info.className = 'user-info';
-      const name = document.createElement('div'); name.className = 'user-name'; name.textContent = u.username;
-      const status = document.createElement('div'); status.className = 'user-status'; status.textContent = u.online ? 'online' : formatLastSeen(u.lastSeen);
-      info.appendChild(name); info.appendChild(status);
-      item.appendChild(info);
-      item.addEventListener('click', () => startPrivateChat(u.id));
-      list.appendChild(item);
-    });
-  }
-}
-
-function getUserAvatarHTML(user) {
-  const div = document.createElement('div'); div.className = 'avatar avatar-48';
-  div.style.backgroundColor = stringToColor(user.username);
-  const initial = document.createElement('span'); initial.textContent = getInitials(user.username); div.appendChild(initial);
-  if (user.avatar) { const img = document.createElement('img'); img.src = user.avatar; img.alt = ''; div.appendChild(img); }
-  if (user.online) { const dot = document.createElement('span'); dot.className = 'online-dot'; div.appendChild(dot); }
-  return div;
-}
-
-function startPrivateChat(otherUserId) {
-  const userId = App.user.id;
-  const key = getPrivateKey(userId, otherUserId);
-  // Check if chat exists in memory (server will create if not)
-  socket.emit('open_private_chat', { otherUserId }, (chat) => {
-    if (chat) {
-      // Add to local chats list if not exists
-      if (!App.chats.find((c) => c.id === chat.id)) {
-        App.chats.push(chat);
-      }
-      openChat(chat.id);
-      switchTab('chats');
-    } else {
-      showToast('Failed to open chat');
+  const list = q('userList'); list.innerHTML = '';
+  App.chats.forEach((chat) => {
+    if (term) { const s = (chat.name + ' ' + (chat.lastMessage && chat.lastMessage.text || '')).toLowerCase(); if (s.indexOf(term) === -1) return; }
+    const item = document.createElement('div');
+    item.className = 'user-item' + (chat.id === App.currentChatId ? ' active' : '');
+    item.appendChild(getChatAvatarHTML(chat));
+    const info = document.createElement('div'); info.className = 'user-info';
+    const top = document.createElement('div'); top.style.display = 'flex'; top.style.justifyContent = 'space-between';
+    const name = document.createElement('div'); name.className = 'user-name'; name.textContent = chat.name;
+    const time = document.createElement('div'); time.style.fontSize = '11px'; time.style.color = 'var(--muted)'; time.textContent = chat.lastMessage ? formatTime(chat.lastMessage.timestamp) : '';
+    top.appendChild(name); top.appendChild(time);
+    const last = document.createElement('div'); last.className = 'last-msg';
+    last.textContent = chat.lastMessage ? (chat.lastMessage.type === 'system' ? chat.lastMessage.text : (chat.lastMessage.sender && chat.lastMessage.sender.username ? chat.lastMessage.sender.username + ': ' : '') + previewText(chat.lastMessage)) : 'No messages';
+    info.appendChild(top); info.appendChild(last);
+    item.appendChild(info);
+    // unread badge
+    if (chat.unread > 0) {
+      const badge = document.createElement('div');
+      badge.style.cssText = 'background:var(--accent);color:#fff;border-radius:50%;font-size:11px;min-width:18px;height:18px;padding:2px 6px;margin-left:8px;display:flex;align-items:center;justify-content:center;';
+      badge.textContent = chat.unread > 99 ? '99+' : chat.unread;
+      item.appendChild(badge);
     }
+    item.addEventListener('click', () => openChat(chat.id));
+    list.appendChild(item);
   });
-}
-
-function switchTab(tab) {
-  if (tab === 'chats') {
-    q('chatsList').classList.remove('hidden');
-    q('usersList').classList.add('hidden');
-    q('tabChats').classList.add('active');
-    q('tabUsers').classList.remove('active');
-  } else {
-    q('chatsList').classList.add('hidden');
-    q('usersList').classList.remove('hidden');
-    q('tabChats').classList.remove('active');
-    q('tabUsers').classList.add('active');
-  }
-  renderChatList();
+  // Show users without chats
+  App.users.forEach((u) => {
+    if (u.id === (App.user && App.user.id)) return;
+    if (term && u.username.indexOf(term) === -1) return;
+    const existingChat = App.chats.find((c) => c.type === 'private' && c.userId === u.id);
+    if (existingChat) return;
+    const item = document.createElement('div');
+    item.className = 'user-item';
+    const avatar = document.createElement('div'); avatar.className = 'avatar avatar-48'; avatar.style.backgroundColor = stringToColor(u.username);
+    const initial = document.createElement('span'); initial.textContent = getInitials(u.username); avatar.appendChild(initial);
+    if (u.avatar) { const img = document.createElement('img'); img.src = u.avatar; avatar.appendChild(img); }
+    if (u.online) { const dot = document.createElement('span'); dot.className = 'online-dot'; avatar.appendChild(dot); }
+    item.appendChild(avatar);
+    const info = document.createElement('div'); info.className = 'user-info';
+    const name = document.createElement('div'); name.className = 'user-name'; name.textContent = u.username;
+    const status = document.createElement('div'); status.className = 'user-status'; status.textContent = u.about || (u.online ? 'online' : 'last seen recently');
+    info.appendChild(name); info.appendChild(status);
+    item.appendChild(info);
+    item.addEventListener('click', () => openChat('private:' + u.id));
+    list.appendChild(item);
+  });
 }
 function previewText(msg) { if (msg.deletedForAll) return 'Message deleted'; if (msg.mediaType === 'image') return '📷 Photo'; if (msg.mediaType === 'video_note') return '🎥 Video circle'; if (msg.mediaType === 'voice') return '🎤 Voice'; if (msg.mediaType === 'file') return '📎 ' + (msg.fileName || 'File'); return msg.text || ''; }
 function getChatAvatarHTML(chat) {
@@ -740,7 +710,7 @@ function stringToColor(str) { let hash = 0; for (let i = 0; i < str.length; i++)
 
 function handleIncoming(chatId, msg) {
   const chat = App.chats.find((c) => c.id === chatId);
-  if (chat) { chat.lastMessage = msg; if (chatId !== App.currentChatId) chat.unread = (chat.unread || 0) + 1; }
+  if (chat) chat.lastMessage = msg;
   if (chatId !== App.currentChatId) { renderChatList(); playNotification(); return; }
   if (!(msg.sender && msg.sender.id === (App.user && App.user.id)) && msg.type !== 'system') playNotification();
   appendMessage(msg);
@@ -836,8 +806,15 @@ function sendMessage() {
   let text = input.value.trim();
   if (App.editId) { socket.emit('edit_message', {chatId: App.currentChatId, messageId: App.editId, text}); input.value = ''; App.editId = null; q('replyBar').classList.add('hidden'); return; }
   if (!text) return; if (text.length > 1000) text = text.slice(0, 1000);
+  // Convert private:userId to actual chatId
+  let chatId = App.currentChatId;
+  if (chatId.startsWith('private:')) {
+    const userId = chatId.replace('private:', '');
+    const chat = App.chats.find((c) => c.type === 'private' && c.userId === userId);
+    if (chat) chatId = chat.id;
+  }
   const payload = { text, mediaType: 'text', replyTo: App.replyTo ? { id: App.replyTo.id, senderName: App.replyTo.sender ? App.replyTo.sender.username : 'Unknown', text: previewText(App.replyTo) } : null };
-  socket.emit('send_message', Object.assign({}, payload, {chatId: App.currentChatId}));
+  socket.emit('send_message', Object.assign({}, payload, {chatId}));
   input.value = ''; App.replyTo = null; App.editId = null; q('replyBar').classList.add('hidden'); q('messageInput').placeholder = 'Write a message...';
   stopTyping();
 }
@@ -898,8 +875,6 @@ function bindGroup() {
     App.users.forEach((u) => { if (u.id === App.user.id) return; const label = document.createElement('label'); label.className = 'member-option'; label.innerHTML = '<input type="checkbox" value="' + u.id + '"><span>' + escapeHTML(u.username) + '</span>'; container.appendChild(label); });
     q('groupModal').classList.remove('hidden');
   });
-  q('tabChats').addEventListener('click', () => switchTab('chats'));
-  q('tabUsers').addEventListener('click', () => switchTab('users'));
   q('createGroup').addEventListener('click', () => {
     const name = q('groupName').value.trim();
     if (!name) return showToast('Enter group name');
@@ -990,8 +965,6 @@ io.on('connection', (socket) => {
       sessions.set(token, id);
       setUserOnline(user, socket);
       socket.emit('logged_in', { user: getUserPublicProfile(user), token });
-      socket.emit('chats_list', getChatListForUser(id));
-      socket.emit('unread_counts', getUnreadCountsForUser(id));
       addSystemMessage('global', username + ' joined');
       broadcastUsers();
     } catch (e) { console.error(e); socket.emit('register_error', 'Server error'); }
@@ -1010,8 +983,6 @@ io.on('connection', (socket) => {
       sessions.set(token, user.id);
       setUserOnline(user, socket);
       socket.emit('logged_in', { user: getUserPublicProfile(user), token });
-      socket.emit('chats_list', getChatListForUser(user.id));
-      socket.emit('unread_counts', getUnreadCountsForUser(user.id));
       broadcastUsers();
       if (!wasOnline) addSystemMessage('global', user.username + ' joined');
     } catch (e) { console.error(e); socket.emit('login_error', 'Server error'); }
@@ -1028,8 +999,6 @@ io.on('connection', (socket) => {
       const wasOnline = onlineSockets.has(user.id) && onlineSockets.get(user.id).size > 0;
       setUserOnline(user, socket);
       socket.emit('logged_in', { user: getUserPublicProfile(user), token: data.token });
-      socket.emit('chats_list', getChatListForUser(user.id));
-      socket.emit('unread_counts', getUnreadCountsForUser(user.id));
       broadcastUsers();
       if (!wasOnline) addSystemMessage('global', user.username + ' joined');
     } catch (e) { console.error(e); socket.emit('auth_error'); }
@@ -1046,7 +1015,14 @@ io.on('connection', (socket) => {
   });
 
   socket.on('get_users', () => { if (!socket.data.userId) return; socket.emit('users_list', Array.from(users.values()).map(getUserPublicProfile)); });
-  socket.on('get_chats', () => { if (!socket.data.userId) return; socket.emit('chats_list', getChatListForUser(socket.data.userId)); socket.emit('unread_counts', getUnreadCountsForUser(socket.data.userId)); });
+  socket.on('get_chats', () => { if (!socket.data.userId) return; socket.emit('chats_list', getChatListForUser(socket.data.userId)); });
+
+  socket.on('create_private_chat', (data) => {
+    const userId = socket.data.userId;
+    if (!userId || !data.userId) return;
+    const chat = ensurePrivateChat(userId, data.userId);
+    socket.emit('chats_list', getChatListForUser(userId));
+  });
 
   socket.on('send_message', (data) => {
     try {
@@ -1199,24 +1175,6 @@ io.on('connection', (socket) => {
     addSystemMessage(chat.id, 'Group "' + chat.name + '" created');
     broadcastChatUpdate(chat, 'chat_created', {});
     socket.emit('chats_list', getChatListForUser(userId));
-  });
-
-  socket.on('open_private_chat', (data, callback) => {
-    const userId = socket.data.userId;
-    if (!userId) return;
-    const otherUser = users.get(data.otherUserId);
-    if (!otherUser) return;
-    const chat = ensurePrivateChat(userId, data.otherUserId);
-    const chatData = {
-      id: chat.id,
-      type: 'private',
-      userId: data.otherUserId,
-      name: otherUser.username,
-      avatar: otherUser.avatarBase64,
-      lastMessage: chat.messages[chat.messages.length - 1] || null,
-      unread: getUnreadCount(userId, chat.id)
-    };
-    if (callback) callback(chatData);
   });
 
   socket.on('clear_history', () => {
