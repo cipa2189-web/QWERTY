@@ -21,6 +21,7 @@ const users = new Map();
 const sessions = new Map();
 const chats = new Map(); // chatId -> { id, type: 'global'|'private'|'group', name, members, messages[], pinnedId, admins }
 const onlineSockets = new Map();
+const unreadCounts = new Map(); // userId -> { chatId -> count }
 
 let adminId = null;
 
@@ -110,7 +111,32 @@ function storeMessage(chat, senderId, payload) {
   const msg = Object.assign({ id: uuidv4(), senderId, timestamp: Date.now(), status: delivered.size > 0 ? 'delivered' : 'sent', reactions: {}, replyTo: null, editedAt: null, deletedForAll: false }, payload);
   chat.messages.push(msg);
   trimHistory(chat.messages, chat.type === 'private' ? MAX_PRIVATE_HISTORY : (chat.type === 'group' ? MAX_GROUP_HISTORY : MAX_GLOBAL_HISTORY));
+  // Increment unread counts
+  if (chat.type === 'global') {
+    for (const uid of users.keys()) {
+      if (uid !== senderId) { incUnread(uid, chat.id); }
+    }
+  } else if (chat.type === 'private') {
+    const other = Array.from(chat.members).find((id) => id !== senderId);
+    if (other) incUnread(other, chat.id);
+  } else if (chat.type === 'group') {
+    chat.members.forEach((uid) => { if (uid !== senderId) incUnread(uid, chat.id); });
+  }
   return msg;
+}
+function incUnread(userId, chatId) {
+  if (!unreadCounts.has(userId)) unreadCounts.set(userId, new Map());
+  const m = unreadCounts.get(userId);
+  m.set(chatId, (m.get(chatId) || 0) + 1);
+}
+function clearUnread(userId, chatId) {
+  if (unreadCounts.has(userId)) {
+    const m = unreadCounts.get(userId);
+    m.delete(chatId);
+  }
+}
+function getUnreadCount(userId, chatId) {
+  return unreadCounts.get(userId)?.get(chatId) || 0;
 }
 
 function enrichMessage(msg) {
@@ -183,6 +209,10 @@ function getChatListForUser(userId) {
     }
   }
   return list;
+}
+
+function markMessagesRead(chatId, userId) {
+  clearUnread(userId, chatId);
 }
 
 // ---------- Multer uploads ----------
@@ -603,6 +633,13 @@ function renderChatList() {
     last.textContent = chat.lastMessage ? (chat.lastMessage.type === 'system' ? chat.lastMessage.text : (chat.lastMessage.sender && chat.lastMessage.sender.username ? chat.lastMessage.sender.username + ': ' : '') + previewText(chat.lastMessage)) : 'No messages';
     info.appendChild(top); info.appendChild(last);
     item.appendChild(info);
+    // unread badge
+    if (chat.unread > 0) {
+      const badge = document.createElement('div');
+      badge.style.cssText = 'background:var(--accent);color:#fff;border-radius:50%;font-size:11px;min-width:18px;height:18px;padding:2px 6px;margin-left:8px;display:flex;align-items:center;justify-content:center;';
+      badge.textContent = chat.unread > 99 ? '99+' : chat.unread;
+      item.appendChild(badge);
+    }
     item.addEventListener('click', () => openChat(chat.id));
     list.appendChild(item);
   });
@@ -1039,7 +1076,18 @@ io.on('connection', (socket) => {
     const chat = getChat(data.chatId);
     if (!chat) return socket.emit('history', { chatId: data.chatId, messages: [], pinnedId: null });
     if (chat.type !== 'global' && !chat.members.has(userId)) return socket.emit('history', { chatId: data.chatId, messages: [], pinnedId: null });
+    markMessagesRead(chat.id, userId);
     socket.emit('history', { chatId: chat.id, pinnedId: chat.pinnedId, messages: chat.messages.map(enrichMessage) });
+  });
+
+  socket.on('get_unread_counts', () => {
+    const userId = socket.data.userId;
+    if (!userId) return;
+    const counts = {};
+    for (const chat of chats.values()) {
+      counts[chat.id] = getUnreadCount(userId, chat.id);
+    }
+    socket.emit('unread_counts', counts);
   });
 
   socket.on('update_profile', (data) => {
