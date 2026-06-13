@@ -1,0 +1,19 @@
+{
+  "name": "telegram-clone-messenger",
+  "version": "1.0.0",
+  "description": "In-memory Telegram-style messenger with Socket.IO",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^9.0.1"
+  },
+  "license": "MIT"
+}
