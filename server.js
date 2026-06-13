@@ -10,7 +10,7 @@ const mime = require('mime-types');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { maxHttpBufferSize: 2e6 });
+const io = new Server(server, { maxHttpBufferSize: 5e6 });
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
@@ -30,7 +30,7 @@ let adminId = null;
 const MAX_GLOBAL_HISTORY = 200;
 const MAX_PRIVATE_HISTORY = 50;
 const MAX_AVATAR_BASE64_LEN = 50 * 1024;
-const MAX_FILE_BASE64_LEN = 300 * 1024;
+const MAX_FILE_BASE64_LEN = 3 * 1024 * 1024;
 const MESSAGE_MAX_LEN = 1000;
 
 // ---------- Theme presets ----------
@@ -661,7 +661,7 @@ function sendMessage() {
 
 function handleFileUpload(file) {
   if (!file) return;
-  if (file.size > 290 * 1024) { showToast('File max 300KB'); return; }
+  if (file.size > 2.9 * 1024 * 1024) { showToast('File max 3MB'); return; }
   const reader = new FileReader();
   reader.onload = (e) => {
     const payload = { text: file.name, mediaType: file.type.startsWith('image/') ? 'image' : 'file', fileUrl: e.target.result, fileName: file.name, fileSize: file.size, mime: file.type };
@@ -689,11 +689,26 @@ async function toggleVideoRecording() {
 }
 function stopVideoRecording() { if (App.videoRecorder && App.videoRecorder.state === 'recording') App.videoRecorder.stop(); }
 async function processVideoRecording() {
-  showToast('Processing video...');
-  const blob = new Blob(App.videoChunks, {type: 'video/webm'});
-  if (blob.size > 300 * 1024) { showToast('Video too large (max 300KB)'); q('videoNoteBtn').classList.remove('recording'); showVideoRecordingPanel(false); return; }
+  showToast('Processing video circle...');
+  let blob = new Blob(App.videoChunks, {type: 'video/webm'});
+  const maxSize = 2.9 * 1024 * 1024;
   
-  // Create video element to draw to canvas for cropping to circle/square
+  // Auto-compress in multiple passes until it fits
+  if (blob.size > maxSize) {
+    showToast('Compressing video...');
+    const sizes = [192, 128];
+    for (const sz of sizes) {
+      blob = await compressVideoBlob(blob, sz, 12);
+      if (blob.size <= maxSize) break;
+    }
+    if (blob.size > maxSize) {
+      showToast('Video too large even after compression (max 3MB) — record shorter clip');
+      q('videoNoteBtn').classList.remove('recording');
+      showVideoRecordingPanel(false);
+      return;
+    }
+  }
+  
   const url = URL.createObjectURL(blob);
   const video = document.createElement('video');
   video.src = url; video.muted = true; video.playsInline = true;
@@ -703,20 +718,15 @@ async function processVideoRecording() {
     const ctx = canvas.getContext('2d');
     const size = Math.min(video.videoWidth, video.videoHeight);
     const sx = (video.videoWidth - size) / 2, sy = (video.videoHeight - size) / 2;
-    
-    // We'll extract a single square frame as poster, and send the original webm blob
-    // (Live re-encoding on canvas is too heavy/complex without MediaRecorder on canvas)
     video.currentTime = 0;
     video.onseeked = () => {
       ctx.drawImage(video, sx, sy, size, size, 0, 0, 320, 320);
-      const posterUrl = canvas.toDataURL('image/jpeg', 0.8);
-      
       const reader = new FileReader();
       reader.onload = (e) => {
         sendMediaMessage({
           text: 'Video circle',
           mediaType: 'video_note',
-          fileUrl: e.target.result, // Send full webm blob (cropped visually by CSS)
+          fileUrl: e.target.result,
           fileName: 'circle.webm',
           fileSize: blob.size,
           mime: 'video/webm',
@@ -729,6 +739,75 @@ async function processVideoRecording() {
       reader.readAsDataURL(blob);
     };
   };
+}
+
+async function compressVideoBlob(inputBlob, targetSize, fps) {
+  return new Promise((resolve) => {
+    try {
+      const url = URL.createObjectURL(inputBlob);
+      const video = document.createElement('video');
+      video.src = url; video.muted = true; video.playsInline = true;
+      video.crossOrigin = 'anonymous';
+      video.onloadedmetadata = async () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = targetSize; canvas.height = targetSize;
+          const ctx = canvas.getContext('2d');
+          const size = Math.min(video.videoWidth, video.videoHeight);
+          const sx = (video.videoWidth - size) / 2, sy = (video.videoHeight - size) / 2;
+          const stream = canvas.captureStream(fps);
+          let recorder;
+          try { recorder = new MediaRecorder(stream, {mimeType: 'video/webm;codecs=vp8'}); }
+          catch (e) { recorder = new MediaRecorder(stream); }
+          const chunks = [];
+          recorder.ondataavailable = (ev) => { if (ev.data.size > 0) chunks.push(ev.data); };
+          
+          const totalFrames = Math.min(300, Math.max(20, Math.floor((video.duration || 5) * fps)));
+          let frame = 0;
+          let ok = false;
+          
+          const startRec = async () => {
+            try { await video.play(); } catch (e) {}
+            recorder.start();
+            const drawFrame = () => {
+              if (!ok) return;
+              if (frame >= totalFrames || video.ended) {
+                ok = false;
+                try { recorder.stop(); } catch (e) {}
+                return;
+              }
+              ctx.drawImage(video, sx, sy, size, size, 0, 0, targetSize, targetSize);
+              frame++;
+              if (frame < totalFrames) {
+                video.currentTime = Math.min(video.duration || 5, frame / fps);
+              } else {
+                try { recorder.stop(); } catch (e) {}
+              }
+            };
+            video.addEventListener('seeked', drawFrame);
+            drawFrame();
+          };
+          
+          recorder.onstop = () => {
+            ok = false;
+            URL.revokeObjectURL(url);
+            const result = chunks.length ? new Blob(chunks, {type: 'video/webm'}) : inputBlob;
+            resolve(result);
+          };
+          
+          ok = true;
+          startRec();
+          // Failsafe timeout
+          setTimeout(() => { if (ok) { ok = false; try { recorder.stop(); } catch (e) {} } }, 15000);
+        } catch (e) {
+          console.error(e);
+          URL.revokeObjectURL(url);
+          resolve(inputBlob);
+        }
+      };
+      video.onerror = () => { URL.revokeObjectURL(url); resolve(inputBlob); };
+    } catch (e) { resolve(inputBlob); }
+  });
 }
 function showVideoRecordingPanel(show, stream) {
   const input = q('messageInput'), attach = q('attachBtn'), vnBtn = q('videoNoteBtn'), micBtn = q('recordBtn');
@@ -768,7 +847,7 @@ async function toggleRecording() {
 function stopRecording() { if (App.mediaRecorder && App.mediaRecorder.state === 'recording') App.mediaRecorder.stop(); }
 async function processRecording() {
   const blob = new Blob(App.recordedChunks, {type: 'audio/webm'});
-  if (blob.size > 290 * 1024) { showToast('Voice too long'); q('recordBtn').classList.remove('recording'); showRecordingPanel(false); return; }
+  if (blob.size > 2.9 * 1024 * 1024) { showToast('Voice too long (max 3MB)'); q('recordBtn').classList.remove('recording'); showRecordingPanel(false); return; }
   const arrayBuffer = await blob.arrayBuffer();
   const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
