@@ -1,7 +1,7 @@
 {
-  "name": "telegram-clone-messenger",
+  "name": "Chat",
   "version": "2.0.0",
-  "description": "In-memory Telegram-style messenger with themes, voice, video circles and files",
+  "description": "Messenger with themes, voice, video circles and files",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
